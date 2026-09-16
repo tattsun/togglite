@@ -24,7 +24,13 @@ hover states). It follows the Windows app theme (dark/light) automatically. Text
 icons use Segoe MDL2 Assets. The only stock control is a borderless Win32 EDIT for the text field,
 so the IME keeps working.
 
-## Setup
+## Install
+
+Download `togglite.exe` (or the zip) from the
+[latest release](https://github.com/tattsun/togglite/releases/latest) and run it from anywhere.
+There is no installer; to start it with Windows, put a shortcut in `shell:startup`.
+
+## Build from source
 
 Requirements: Windows 10/11, [mise](https://mise.jdx.dev/), Visual Studio with the C++ build tools and a Windows SDK.
 
@@ -57,6 +63,16 @@ A demo mode seeds sample data so the UI can be reviewed without an account. It m
 $env:TOGGLITE_DEMO = "running"   # or "idle"
 $env:TOGGLITE_THEME = "light"    # or "dark"; unset to follow the OS setting
 cargo run
+```
+
+## Releasing
+
+CI builds and tests every push. Pushing a tag that matches the version in `Cargo.toml`
+builds the release binary on GitHub Actions and publishes it with SHA-256 checksums:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 ## License
