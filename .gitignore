@@ -1,0 +1,15 @@
+# Build output
+/target
+
+# Local tool / editor state
+/mise.local.toml
+/.mise.local.toml
+/.claude/settings.local.json
+/.vscode
+/.idea
+*.swp
+Thumbs.db
+.DS_Store
+
+# Settings live in %APPDATA%\togglite\config.json; never commit one
+config.json

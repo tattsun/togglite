@@ -1,0 +1,19 @@
+[tools]
+rust = "1.98"
+
+[tasks.build]
+description = "Release build"
+run = "cargo build --release"
+
+[tasks.start]
+description = "Run the release binary"
+depends = ["build"]
+run = "target/release/togglite.exe"
+
+[tasks.dev]
+description = "Debug build and run"
+run = "cargo run"
+
+[tasks.test]
+description = "Run unit tests"
+run = "cargo test"

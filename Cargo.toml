@@ -1,0 +1,34 @@
+[package]
+name = "togglite"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-lightweight Toggl Track tray client for Windows"
+license = "MIT"
+repository = "https://github.com/tattsun/togglite"
+readme = "README.md"
+publish = false
+build = "build.rs"
+
+[dependencies]
+native-windows-gui = { version = "1.0.13", default-features = false, features = [
+    "message-window", "menu", "notice", "animation-timer",
+    "tray-notification", "embed-resource",
+] }
+winapi = { version = "0.3", features = [
+    "winuser", "windef", "minwindef", "wingdi", "dwmapi", "libloaderapi", "shellapi", "winreg",
+    "dpapi", "wincrypt", "winbase",
+] }
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
