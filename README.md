@@ -15,7 +15,8 @@ The release binary is about 0.6 MB and uses a few MB of private memory.
   - recent entries restart with a single click (mouse wheel to scroll)
   - Esc or losing focus closes the popup; drag any empty area to move it, and the position is remembered
 - Right-click menu: Start/Stop, Open, Reload, Settings, Quit.
-- Settings (API token) live on a page inside the popup.
+- Settings (API token, language) live on a page inside the popup.
+- English and Japanese UI. Follows the Windows display language by default; switchable in Settings.
 
 ## Design
 
@@ -46,6 +47,8 @@ On first launch the settings page opens. Paste the API token from the bottom of 
 ## Configuration and security
 
 - Settings are stored in `%APPDATA%\togglite\config.json`.
+- The UI language follows the Windows display language (Japanese, otherwise English) until you pick
+  one in Settings; the choice is stored as `"language"` in `config.json` and applies immediately.
 - The API token is encrypted with Windows DPAPI, bound to your user account, so it cannot be decrypted by other users or on other machines.
 - The only network endpoint is `https://api.track.toggl.com`. There is no telemetry and no auto-update.
 - To render popup menus in the dark theme, Togglite calls the same undocumented uxtheme.dll entry points (ordinals 135/136) that Explorer uses. If they are missing, it silently falls back to the default menu look.
@@ -62,8 +65,12 @@ A demo mode seeds sample data so the UI can be reviewed without an account. It m
 ```powershell
 $env:TOGGLITE_DEMO = "running"   # or "idle"
 $env:TOGGLITE_THEME = "light"    # or "dark"; unset to follow the OS setting
+$env:TOGGLITE_LANG = "en"        # or "ja"; pretends the Windows display language is this
 cargo run
 ```
+
+To add a language, add a variant to `Lang` (plus its tag and native name) and a string table in
+`src/i18n.rs`; the compiler flags any missing entry and the settings picker lists it automatically.
 
 ## Releasing
 

@@ -3,6 +3,9 @@
 //! The API token is stored encrypted with Windows DPAPI (bound to the current user
 //! account), base64-encoded in `api_token_dpapi`. A legacy plaintext `api_token`
 //! field is still read and migrated to the encrypted form on the next save.
+//!
+//! `language` is an optional tag (`en`, `ja`); when absent the UI follows the
+//! Windows display language.
 
 use crate::util::{base64, base64_decode, wide};
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ pub struct Config {
     pub api_token: String,
     pub popup_x: Option<i32>,
     pub popup_y: Option<i32>,
+    pub language: Option<String>,
     /// True when the token was read from the legacy plaintext field.
     pub legacy_plaintext: bool,
 }
@@ -32,6 +36,8 @@ struct Stored {
     popup_x: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     popup_y: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
 }
 
 pub fn path() -> PathBuf {
@@ -68,6 +74,7 @@ fn load_from(p: &Path) -> Config {
         api_token,
         popup_x: stored.popup_x,
         popup_y: stored.popup_y,
+        language: stored.language.filter(|l| !l.trim().is_empty()),
         legacy_plaintext,
     }
 }
@@ -80,6 +87,7 @@ fn save_to(p: &Path, cfg: &Config) -> Result<(), String> {
     let mut stored = Stored {
         popup_x: cfg.popup_x,
         popup_y: cfg.popup_y,
+        language: cfg.language.clone(),
         ..Stored::default()
     };
     if !token.is_empty() {
@@ -167,6 +175,7 @@ mod tests {
             api_token: "s3cret-token".into(),
             popup_x: Some(10),
             popup_y: Some(20),
+            language: Some("ja".into()),
             legacy_plaintext: false,
         };
         save_to(&p, &cfg).unwrap();
@@ -176,6 +185,7 @@ mod tests {
         let back = load_from(&p);
         assert_eq!(back.api_token, "s3cret-token");
         assert_eq!((back.popup_x, back.popup_y), (Some(10), Some(20)));
+        assert_eq!(back.language.as_deref(), Some("ja"));
         assert!(!back.legacy_plaintext);
         let _ = fs::remove_file(&p);
     }
@@ -199,6 +209,17 @@ mod tests {
     fn missing_file_is_default() {
         let cfg = load_from(Path::new("Z:/definitely/missing/config.json"));
         assert!(cfg.api_token.is_empty());
+        assert!(cfg.language.is_none());
         assert!(!cfg.legacy_plaintext);
+    }
+
+    #[test]
+    fn language_is_optional_and_omitted_when_unset() {
+        let p = temp_file("lang.json");
+        save_to(&p, &Config::default()).unwrap();
+        assert!(!fs::read_to_string(&p).unwrap().contains("language"));
+        fs::write(&p, r#"{ "language": "" }"#).unwrap();
+        assert!(load_from(&p).language.is_none());
+        let _ = fs::remove_file(&p);
     }
 }

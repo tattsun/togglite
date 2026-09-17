@@ -16,7 +16,7 @@ native-windows-gui = { version = "1.0.13", default-features = false, features = 
 ] }
 winapi = { version = "0.3", features = [
     "winuser", "windef", "minwindef", "wingdi", "dwmapi", "libloaderapi", "shellapi", "winreg",
-    "dpapi", "wincrypt", "winbase",
+    "dpapi", "wincrypt", "winbase", "winnls",
 ] }
 ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
 native-tls = "0.2"

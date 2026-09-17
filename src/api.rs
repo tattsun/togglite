@@ -1,3 +1,4 @@
+use crate::i18n::t;
 use crate::util::{base64, now_unix, parse_rfc3339, rfc3339_utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -92,16 +93,16 @@ impl Client {
         match r {
             Ok(resp) => resp
                 .into_json::<T>()
-                .map_err(|e| format!("応答の解析に失敗: {e}")),
+                .map_err(|e| format!("{}: {e}", t().err_parse)),
             Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
-                Err("認証エラー: API トークンを確認してください".to_string())
+                Err(t().err_auth.to_string())
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
                 let body: String = body.chars().take(200).collect();
                 Err(format!("HTTP {code}: {body}"))
             }
-            Err(ureq::Error::Transport(t)) => Err(format!("通信エラー: {t}")),
+            Err(ureq::Error::Transport(e)) => Err(format!("{}: {e}", t().err_network)),
         }
     }
 

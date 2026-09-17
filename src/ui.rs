@@ -1,6 +1,7 @@
 //! Custom-drawn popup window (GDI+ shapes, GDI text). No common controls except a
 //! borderless EDIT for text input so IME keeps working.
 
+use crate::i18n::t;
 use std::cell::{Cell, RefCell};
 use winapi::ctypes::c_void;
 use std::ptr::{null, null_mut};
@@ -355,6 +356,7 @@ const GLYPH_STOP: &str = "\u{E71A}";
 const GLYPH_CHEVRON: &str = "\u{E70D}";
 const GLYPH_CLOSE: &str = "\u{E711}";
 const GLYPH_BACK: &str = "\u{E72B}";
+const GLYPH_GLOBE: &str = "\u{E774}";
 
 // ---------------------------------------------------------------- view model
 
@@ -372,6 +374,7 @@ pub enum Action {
     OpenSettings,
     CloseSettings,
     PickProject,
+    PickLanguage,
     Recent(usize),
     Save,
     OpenTokenPage,
@@ -401,6 +404,8 @@ pub struct View {
     pub running: Option<RunningView>,
     pub project: Option<ProjectView>,
     pub recent: Vec<RecentView>,
+    /// Label of the language chip on the settings page.
+    pub language: String,
 }
 
 pub trait Host {
@@ -414,7 +419,7 @@ pub trait Host {
 
 const WIN_W: i32 = 340;
 const WIN_H_MAIN: i32 = 534;
-const WIN_H_SETTINGS: i32 = 292;
+const WIN_H_SETTINGS: i32 = 386;
 const PAD: i32 = 16;
 const HEADER_Y: i32 = 14;
 const ICON_BTN: i32 = 28;
@@ -603,8 +608,8 @@ impl Popup {
 
     fn apply_page_chrome(&self) {
         let (h, cue, pw) = match self.page.get() {
-            Page::Main => (WIN_H_MAIN, "何をしていますか？", 0usize),
-            Page::Settings => (WIN_H_SETTINGS, "API トークンを貼り付け", '●' as usize),
+            Page::Main => (WIN_H_MAIN, t().cue_description, 0usize),
+            Page::Settings => (WIN_H_SETTINGS, t().cue_token, '●' as usize),
         };
         let cue = wide(cue);
         unsafe {
@@ -703,18 +708,31 @@ impl Popup {
     /// Native popup menu listing projects. Returns None if cancelled,
     /// Some(None) for "no project", Some(Some(i)) for `names[i]`.
     pub fn pick_project(&self, names: &[String], current: Option<usize>) -> Option<Option<usize>> {
-        let layout = self.layout_main(false);
+        let chip = self.layout_main(false).chip;
+        self.pick_below(&chip, t().no_project, names, current)
+    }
+
+    /// Native popup menu listing languages. Returns None if cancelled,
+    /// Some(None) for "automatic", Some(Some(i)) for `names[i]`.
+    pub fn pick_language(&self, names: &[String], current: Option<usize>) -> Option<Option<usize>> {
+        let chip = self.layout_settings().lang_chip;
+        self.pick_below(&chip, t().language_auto, names, current)
+    }
+
+    /// Shows a menu anchored under `anchor`: a `none` entry, a separator, then `names`.
+    /// `current` is the checked entry (None = the `none` entry).
+    fn pick_below(&self, anchor: &RECT, none: &str, names: &[String], current: Option<usize>) -> Option<Option<usize>> {
         unsafe {
             let menu = CreatePopupMenu();
             let check = |i: Option<usize>| if i == current { MF_CHECKED } else { 0 };
-            AppendMenuW(menu, MF_STRING | check(None), 1, wide("プロジェクトなし").as_ptr());
+            AppendMenuW(menu, MF_STRING | check(None), 1, wide(none).as_ptr());
             if !names.is_empty() {
                 AppendMenuW(menu, MF_SEPARATOR, 0, null());
             }
             for (i, n) in names.iter().enumerate() {
                 AppendMenuW(menu, MF_STRING | check(Some(i)), 2 + i, wide(n).as_ptr());
             }
-            let mut pt = POINT { x: layout.chip.left, y: layout.chip.bottom + self.s(4) };
+            let mut pt = POINT { x: anchor.left, y: anchor.bottom + self.s(4) };
             ClientToScreen(self.hwnd, &mut pt);
             let id = TrackPopupMenu(
                 menu,
@@ -732,6 +750,12 @@ impl Popup {
                 n => Some(Some((n - 2) as usize)),
             }
         }
+    }
+
+    /// Re-applies language-dependent window text (the edit's cue banner) and repaints.
+    pub fn refresh_text(&self) {
+        self.apply_page_chrome();
+        self.invalidate();
     }
 
     // ------------------------------------------------------------ layout
@@ -786,8 +810,11 @@ impl Popup {
             pill: self.rect(PAD, CONTENT_Y + 26, inner_w, 44),
             hint: self.rect(PAD, CONTENT_Y + 80, inner_w, 40),
             link: self.rect(PAD, CONTENT_Y + 122, inner_w, 18),
-            error: self.rect(PAD, CONTENT_Y + 146, inner_w, 18),
-            button: self.rect(PAD, CONTENT_Y + 174, inner_w, 44),
+            divider_y: self.s(CONTENT_Y + 156),
+            lang_label: self.rect(PAD, CONTENT_Y + 170, inner_w, 20),
+            lang_chip: self.rect(PAD, CONTENT_Y + 196, inner_w, 34),
+            error: self.rect(PAD, CONTENT_Y + 244, inner_w, 18),
+            button: self.rect(PAD, CONTENT_Y + 268, inner_w, 44),
         }
     }
 
@@ -915,13 +942,13 @@ impl Popup {
 
         // ---- header
         let (dot_color, caption, caption_color) = if view.busy {
-            (pal.muted, "同期中…".to_string(), pal.muted)
+            (pal.muted, t().status_syncing.to_string(), pal.muted)
         } else if let Some(e) = &view.error {
             (pal.danger, e.clone(), pal.danger)
         } else if running {
-            (pal.success, "計測中".to_string(), pal.muted)
+            (pal.success, t().status_tracking.to_string(), pal.muted)
         } else {
-            (pal.muted, "停止中".to_string(), pal.muted)
+            (pal.muted, t().status_stopped.to_string(), pal.muted)
         };
         if running && !view.busy && view.error.is_none() {
             c.dot((l.dot.left + l.dot.right) / 2, (l.dot.top + l.dot.bottom) / 2, self.s(10), dot_color);
@@ -951,19 +978,19 @@ impl Popup {
                         c.text(self.fonts.small, pal.muted, &tr, &p.name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                     }
                     None => {
-                        c.text(self.fonts.small, pal.muted, &proj_r, "プロジェクトなし", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                        c.text(self.fonts.small, pal.muted, &proj_r, t().no_project, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                     }
                 }
                 let timer_r = RECT { left: x, top: l.card.top + self.s(24), right: x + w, bottom: l.card.top + self.s(62) };
                 c.text(self.fonts.timer, pal.text, &timer_r, &run.elapsed, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 let desc_r = RECT { left: x, top: l.card.top + self.s(60), right: x + w, bottom: l.card.top + self.s(80) };
-                let desc = if run.desc.is_empty() { "(説明なし)" } else { run.desc.as_str() };
+                let desc = if run.desc.is_empty() { t().no_description } else { run.desc.as_str() };
                 c.text(self.fonts.body, if run.desc.is_empty() { pal.muted } else { pal.text }, &desc_r, desc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
                 let hot = self.hovered(&prev, Action::Stop);
                 c.fill_round(&l.button, self.s(10) as f32, if hot { pal.surface2 } else { pal.surface });
                 c.stroke_round(&l.button, self.s(10) as f32, pal.border, 1.0);
-                self.glyph_and_label(c, &l.button, GLYPH_STOP, "停止", pal.danger);
+                self.glyph_and_label(c, &l.button, GLYPH_STOP, t().stop, pal.danger);
                 regions.push((l.button, Action::Stop));
             }
             None => {
@@ -982,7 +1009,7 @@ impl Popup {
                     }
                     None => {
                         c.ring(cx, cy, self.s(9), pal.muted, 1.5);
-                        c.text(self.fonts.body, pal.muted, &name_r, "プロジェクトなし", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                        c.text(self.fonts.body, pal.muted, &name_r, t().no_project, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                     }
                 }
                 let chev = RECT { left: l.chip.right - self.s(32), top: l.chip.top, right: l.chip.right - self.s(8), bottom: l.chip.bottom };
@@ -991,18 +1018,18 @@ impl Popup {
 
                 let hot = self.hovered(&prev, Action::Start);
                 c.fill_round(&l.button, self.s(10) as f32, if hot { pal.accent_hover } else { pal.accent });
-                self.glyph_and_label(c, &l.button, GLYPH_PLAY, "開始", pal.on_accent);
+                self.glyph_and_label(c, &l.button, GLYPH_PLAY, t().start, pal.on_accent);
                 regions.push((l.button, Action::Start));
             }
         }
 
         // ---- recent
-        c.text(self.fonts.small, pal.muted, &l.recent_caption, "最近のエントリ", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.small, pal.muted, &l.recent_caption, t().recent_entries, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         c.hline(l.recent_caption.left, l.recent_caption.right, l.divider_y, pal.border);
 
         if view.recent.is_empty() {
             let r = RECT { left: l.recent_caption.left, top: l.rows_y, right: l.recent_caption.right, bottom: l.rows_y + l.row_h };
-            let msg = if view.has_token { "エントリがありません" } else { "設定から API トークンを登録してください" };
+            let msg = if view.has_token { t().no_entries } else { t().need_token };
             c.text(self.fonts.caption, pal.muted, &r, msg, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
@@ -1025,7 +1052,7 @@ impl Popup {
             let play_w = if hot { self.s(22) } else { 0 };
             let name_r = RECT { left: r.right - self.s(12) - right_w - play_w, top: r.top, right: r.right - self.s(12) - play_w, bottom: r.bottom };
             let desc_r = RECT { left: r.left + self.s(28), top: r.top, right: name_r.left - self.s(8), bottom: r.bottom };
-            let desc = if item.desc.is_empty() { "(説明なし)" } else { item.desc.as_str() };
+            let desc = if item.desc.is_empty() { t().no_description } else { item.desc.as_str() };
             c.text(self.fonts.body, if item.desc.is_empty() { pal.muted } else { pal.text }, &desc_r, desc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if let Some(p) = &item.project {
                 c.text(self.fonts.small, pal.muted, &name_r, &p.name, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1045,26 +1072,39 @@ impl Popup {
 
         self.icon_button(c, &l.back, if view.has_token { GLYPH_BACK } else { GLYPH_CLOSE }, self.hovered(&prev, Action::CloseSettings));
         regions.push((l.back, Action::CloseSettings));
-        c.text(self.fonts.body_semi, pal.text, &l.caption, "設定", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.body_semi, pal.text, &l.caption, t().settings, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        c.text(self.fonts.caption, pal.muted, &l.label, "Toggl API トークン", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.caption, pal.muted, &l.label, t().token_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         c.fill_round(&l.pill, self.s(10) as f32, pal.surface2);
         self.place_edit(Some(self.edit_rect_in(&l.pill)));
 
-        c.text(self.fonts.small, pal.muted, &l.hint, "Toggl の Profile settings ページ下部にある API Token をコピーして貼り付けてください。", DT_LEFT | DT_WORDBREAK);
+        c.text(self.fonts.small, pal.muted, &l.hint, t().token_hint, DT_LEFT | DT_WORDBREAK);
         let hot = self.hovered(&prev, Action::OpenTokenPage);
-        c.text(self.fonts.small, if hot { pal.accent_hover } else { pal.accent }, &l.link, "track.toggl.com/profile を開く ↗", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.small, if hot { pal.accent_hover } else { pal.accent }, &l.link, t().open_profile, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         regions.push((l.link, Action::OpenTokenPage));
+
+        // ---- language (same chip idiom as the project picker on the main page)
+        c.hline(l.lang_label.left, l.lang_label.right, l.divider_y, pal.border);
+        c.text(self.fonts.caption, pal.muted, &l.lang_label, t().language, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        let hot = self.hovered(&prev, Action::PickLanguage);
+        c.fill_round(&l.lang_chip, self.s(9) as f32, if hot { pal.surface2 } else { pal.surface });
+        let glyph_r = RECT { left: l.lang_chip.left + self.s(8), top: l.lang_chip.top, right: l.lang_chip.left + self.s(24), bottom: l.lang_chip.bottom };
+        c.text(self.fonts.icon, pal.muted, &glyph_r, GLYPH_GLOBE, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        let name_r = RECT { left: l.lang_chip.left + self.s(30), top: l.lang_chip.top, right: l.lang_chip.right - self.s(34), bottom: l.lang_chip.bottom };
+        c.text(self.fonts.body, pal.text, &name_r, &view.language, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        let chev = RECT { left: l.lang_chip.right - self.s(32), top: l.lang_chip.top, right: l.lang_chip.right - self.s(8), bottom: l.lang_chip.bottom };
+        c.text(self.fonts.icon, pal.muted, &chev, GLYPH_CHEVRON, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        regions.push((l.lang_chip, Action::PickLanguage));
 
         if let Some(e) = &view.error {
             c.text(self.fonts.small, pal.danger, &l.error, e, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         } else if view.busy {
-            c.text(self.fonts.small, pal.muted, &l.error, "確認中…", DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            c.text(self.fonts.small, pal.muted, &l.error, t().checking, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
         let hot = self.hovered(&prev, Action::Save);
         c.fill_round(&l.button, self.s(10) as f32, if hot { pal.accent_hover } else { pal.accent });
-        c.text(self.fonts.body_semi, pal.on_accent, &l.button, "保存", DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.body_semi, pal.on_accent, &l.button, t().save, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         regions.push((l.button, Action::Save));
     }
 
@@ -1257,6 +1297,9 @@ struct SettingsLayout {
     pill: RECT,
     hint: RECT,
     link: RECT,
+    divider_y: i32,
+    lang_label: RECT,
+    lang_chip: RECT,
     error: RECT,
     button: RECT,
 }

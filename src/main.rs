@@ -2,10 +2,12 @@
 
 mod api;
 mod config;
+mod i18n;
 mod ui;
 mod util;
 
 use api::{Client, Project, TimeEntry};
+use i18n::t;
 use native_windows_gui as nwg;
 use std::cell::RefCell;
 use winapi::ctypes::c_void;
@@ -119,13 +121,14 @@ impl App {
         let mut mi_quit = nwg::MenuItem::default();
         let mut sep1 = nwg::MenuSeparator::default();
         let mut sep2 = nwg::MenuSeparator::default();
-        nwg::MenuItem::builder().text("開始").parent(&menu).build(&mut mi_toggle)?;
-        nwg::MenuItem::builder().text("開く\tCtrl+Alt+T").parent(&menu).build(&mut mi_open)?;
+        nwg::MenuItem::builder().text(t().menu_start).parent(&menu).build(&mut mi_toggle)?;
+        let open_label = format!("{}\tCtrl+Alt+T", t().menu_open);
+        nwg::MenuItem::builder().text(&open_label).parent(&menu).build(&mut mi_open)?;
         nwg::MenuSeparator::builder().parent(&menu).build(&mut sep1)?;
-        nwg::MenuItem::builder().text("再読み込み").parent(&menu).build(&mut mi_sync)?;
-        nwg::MenuItem::builder().text("設定...").parent(&menu).build(&mut mi_settings)?;
+        nwg::MenuItem::builder().text(t().menu_reload).parent(&menu).build(&mut mi_sync)?;
+        nwg::MenuItem::builder().text(t().menu_settings).parent(&menu).build(&mut mi_settings)?;
         nwg::MenuSeparator::builder().parent(&menu).build(&mut sep2)?;
-        nwg::MenuItem::builder().text("終了").parent(&menu).build(&mut mi_quit)?;
+        nwg::MenuItem::builder().text(t().menu_quit).parent(&menu).build(&mut mi_quit)?;
 
         let mut timer = nwg::AnimationTimer::default();
         nwg::AnimationTimer::builder()
@@ -275,14 +278,14 @@ impl App {
     fn save_settings(&self) {
         let token = self.popup.edit_text().trim().to_string();
         if token.is_empty() {
-            self.state.borrow_mut().last_error = Some("API トークンを入力してください".into());
+            self.state.borrow_mut().last_error = Some(t().err_token_empty.into());
             self.popup.invalidate();
             return;
         }
         let mut cfg = config::load();
         cfg.api_token = token.clone();
         if let Err(e) = config::save(&cfg) {
-            self.state.borrow_mut().last_error = Some(format!("設定の保存に失敗: {e}"));
+            self.state.borrow_mut().last_error = Some(format!("{}: {e}", t().err_save_failed));
             self.popup.invalidate();
             return;
         }
@@ -297,7 +300,7 @@ impl App {
     fn set_token(&self, token: &str) {
         match Client::new(token) {
             Ok(c) => self.state.borrow_mut().client = Some(c),
-            Err(e) => self.notify(&format!("初期化に失敗: {e}"), true),
+            Err(e) => self.notify(&format!("{}: {e}", t().err_init_failed), true),
         }
     }
 
@@ -325,6 +328,36 @@ impl App {
         }
         self.popup.invalidate();
         self.popup.focus_edit();
+    }
+
+    fn pick_language(&self) {
+        use i18n::Lang;
+        let names: Vec<String> = Lang::ALL.iter().map(|l| l.native_name().to_string()).collect();
+        let current = i18n::preference().and_then(|p| Lang::ALL.iter().position(|l| *l == p));
+        if let Some(choice) = self.popup.pick_language(&names, current) {
+            let pref = choice.and_then(|i| Lang::ALL.get(i).copied());
+            if pref != i18n::preference() {
+                let mut cfg = config::load();
+                cfg.language = pref.map(|l| l.tag().to_string());
+                let _ = config::save(&cfg);
+                i18n::set_preference(pref);
+                self.apply_language();
+            }
+        }
+        self.popup.invalidate();
+        self.popup.focus_edit();
+    }
+
+    /// Re-renders everything that was built with the previous language.
+    fn apply_language(&self) {
+        set_menu_item_text(&self.mi_open, &format!("{}\tCtrl+Alt+T", t().menu_open));
+        set_menu_item_text(&self.mi_sync, t().menu_reload);
+        set_menu_item_text(&self.mi_settings, t().menu_settings);
+        set_menu_item_text(&self.mi_quit, t().menu_quit);
+        // A message from the old language would look out of place.
+        self.state.borrow_mut().last_error = None;
+        self.popup.refresh_text();
+        self.refresh_ui();
     }
 
     fn toggle_timer(&self) {
@@ -358,7 +391,7 @@ impl App {
         }
         let wid = self.state.borrow().workspace_id;
         if wid == 0 {
-            self.state.borrow_mut().last_error = Some("まだ同期されていません".into());
+            self.state.borrow_mut().last_error = Some(t().err_not_synced.into());
             self.sync();
             return;
         }
@@ -472,17 +505,17 @@ impl App {
         let (tip, menu_text) = match &st.current {
             Some(c) => {
                 let elapsed = fmt_hms(c.elapsed(now));
-                let d = if c.desc().is_empty() { "(説明なし)" } else { c.desc() };
+                let d = if c.desc().is_empty() { t().no_description } else { c.desc() };
                 let proj = st
                     .project(c.project_id)
                     .map(|p| format!("  ·  {}", p.name))
                     .unwrap_or_default();
                 (
                     format!("Togglite ▶ {} ({elapsed}){proj}", truncate(d, 60)),
-                    format!("停止: {} ({elapsed})", truncate(d, 40)),
+                    format!("{}: {} ({elapsed})", t().menu_stop, truncate(d, 40)),
                 )
             }
-            None => ("Togglite (停止中)".to_string(), "開始".to_string()),
+            None => (t().tip_stopped.to_string(), t().menu_start.to_string()),
         };
         let running = st.current.is_some();
         drop(st);
@@ -500,34 +533,58 @@ impl App {
         let mut st = self.state.borrow_mut();
         st.client = Client::new("demo").ok();
         st.workspace_id = 1;
-        let mk = |id: i64, name: &str, color: &str| Project {
-            id,
-            name: name.to_string(),
-            color: Some(color.to_string()),
-            active: Some(true),
+        // Sample text in the UI language so screenshots read naturally.
+        let (projects, recent): ([&str; 4], [&str; 8]) = match i18n::current() {
+            i18n::Lang::Ja => (
+                ["Togglite", "社内ツール改善", "読書/学習", "Side project"],
+                [
+                    "トレイ UI の再設計",
+                    "週次ミーティング",
+                    "API クライアントのテスト",
+                    "CI パイプラインの調査",
+                    "Rust の本を読む",
+                    "ブログ下書き",
+                    "メール返信",
+                    "デザインレビュー",
+                ],
+            ),
+            i18n::Lang::En => (
+                ["Togglite", "Internal tools", "Reading / learning", "Side project"],
+                [
+                    "Redesign the tray UI",
+                    "Weekly meeting",
+                    "API client tests",
+                    "Investigate CI pipeline",
+                    "Read the Rust book",
+                    "Blog post draft",
+                    "Reply to emails",
+                    "Design review",
+                ],
+            ),
         };
-        st.projects = vec![
-            mk(1, "Togglite", "#e55ca8"),
-            mk(2, "社内ツール改善", "#3d8bff"),
-            mk(3, "読書/学習", "#f5a623"),
-            mk(4, "Side project", "#2ec4b6"),
-        ];
-        let rec = |d: &str, p: Option<i64>| RecentItem { description: d.to_string(), project_id: p };
-        st.recent = vec![
-            rec("トレイ UI の再設計", Some(1)),
-            rec("週次ミーティング", None),
-            rec("API クライアントのテスト", Some(1)),
-            rec("CI パイプラインの調査", Some(2)),
-            rec("Rust の本を読む", Some(3)),
-            rec("ブログ下書き", Some(4)),
-            rec("メール返信", None),
-            rec("デザインレビュー", Some(2)),
-        ];
+        let colors = ["#e55ca8", "#3d8bff", "#f5a623", "#2ec4b6"];
+        st.projects = projects
+            .iter()
+            .zip(colors)
+            .enumerate()
+            .map(|(i, (name, color))| Project {
+                id: i as i64 + 1,
+                name: name.to_string(),
+                color: Some(color.to_string()),
+                active: Some(true),
+            })
+            .collect();
+        let project_of = [Some(1), None, Some(1), Some(2), Some(3), Some(4), None, Some(2)];
+        st.recent = recent
+            .iter()
+            .zip(project_of)
+            .map(|(d, p)| RecentItem { description: d.to_string(), project_id: p })
+            .collect();
         if mode == "running" {
             st.current = Some(TimeEntry {
                 id: 1,
                 workspace_id: 1,
-                description: Some("トレイ UI の再設計".into()),
+                description: Some(recent[0].into()),
                 project_id: Some(1),
                 start: util::rfc3339_utc(now_unix() - 754),
                 stop: None,
@@ -566,6 +623,10 @@ impl Host for App {
                     project: st.project_view(r.project_id),
                 })
                 .collect(),
+            language: match i18n::preference() {
+                Some(l) => l.native_name().to_string(),
+                None => format!("{} ({})", t().language_auto, i18n::current().native_name()),
+            },
         }
     }
 
@@ -582,6 +643,7 @@ impl Host for App {
             Action::OpenSettings => self.open_settings(),
             Action::CloseSettings => self.close_settings(),
             Action::PickProject => self.pick_project(),
+            Action::PickLanguage => self.pick_language(),
             Action::Recent(i) => self.start_recent(i),
             Action::Save => self.save_settings(),
             Action::OpenTokenPage => ui::open_url("https://track.toggl.com/profile"),
@@ -635,6 +697,8 @@ fn main() {
     nwg::init().expect("Failed to init Native Windows GUI");
     ui::init_gdiplus();
     ui::enable_dark_menus();
+    // Menu labels are fixed at build time, so the language must be chosen first.
+    i18n::init(config::load().language.as_deref());
 
     let app = App::build().expect("Failed to build UI");
     let handler = App::bind(&app);
