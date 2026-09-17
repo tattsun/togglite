@@ -36,15 +36,22 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
+      - name: Build installer (Inno Setup, preinstalled on windows-latest)
+        shell: pwsh
+        run: iscc installer\togglite.iss
+
       - name: Package
         shell: pwsh
         run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          $setup = "dist/Togglite-Setup-$ver.exe"
+          if (-not (Test-Path $setup)) { Write-Error "installer $setup not found"; exit 1 }
           $name = "togglite-${{ github.ref_name }}-windows-x64"
           New-Item -ItemType Directory -Force dist/$name | Out-Null
           Copy-Item target/release/togglite.exe, README.md, LICENSE dist/$name/
           Compress-Archive -Path dist/$name -DestinationPath dist/$name.zip
           Copy-Item target/release/togglite.exe dist/togglite.exe
-          Get-FileHash dist/$name.zip, dist/togglite.exe -Algorithm SHA256 |
+          Get-FileHash $setup, dist/$name.zip, dist/togglite.exe -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
             Set-Content dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
@@ -54,6 +61,7 @@ jobs:
         with:
           generate_release_notes: true
           files: |
+            dist/Togglite-Setup-*.exe
             dist/togglite-${{ github.ref_name }}-windows-x64.zip
             dist/togglite.exe
             dist/SHA256SUMS.txt

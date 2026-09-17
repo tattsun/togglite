@@ -378,6 +378,10 @@ pub enum Action {
     Recent(usize),
     Save,
     OpenTokenPage,
+    /// Another instance was launched: bring the popup up.
+    Activate,
+    /// The installer asked us to exit.
+    Quit,
 }
 
 #[derive(Clone)]
@@ -432,6 +436,13 @@ const EM_SETCUEBANNER: u32 = 0x1501;
 const DWMWA_WINDOW_ROUNDED_PREFERENCE: u32 = 33;
 const DWMWA_BORDER_COLOR: u32 = 34;
 
+/// Window class of the popup; other processes find the running instance by it.
+pub const POPUP_CLASS: &str = "TogglitePopup";
+/// Posted by a second instance: bring the popup up.
+pub const WM_TOGGLITE_SHOW: UINT = WM_APP + 1;
+/// Posted by the installer/uninstaller: exit cleanly.
+pub const WM_TOGGLITE_QUIT: UINT = WM_APP + 2;
+
 // ---------------------------------------------------------------- popup
 
 pub struct Popup {
@@ -468,7 +479,7 @@ pub struct PopupBinding {
 
 impl Popup {
     pub fn new() -> Popup {
-        let class = wide("TogglitePopup");
+        let class = wide(POPUP_CLASS);
         unsafe {
             let hinst = GetModuleHandleW(null());
             let wc = WNDCLASSEXW {
@@ -1249,6 +1260,14 @@ impl Popup {
                 }
                 WM_SETTINGCHANGE => {
                     self.refresh_theme();
+                    0
+                }
+                WM_TOGGLITE_SHOW => {
+                    host.perform(Action::Activate);
+                    0
+                }
+                WM_TOGGLITE_QUIT => {
+                    host.perform(Action::Quit);
                     0
                 }
                 _ => DefWindowProcW(hwnd, msg, w, l),

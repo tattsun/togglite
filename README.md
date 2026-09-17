@@ -15,6 +15,7 @@ The release binary is about 0.6 MB and uses a few MB of private memory.
   - recent entries restart with a single click (mouse wheel to scroll)
   - Esc or losing focus closes the popup; drag any empty area to move it, and the position is remembered
 - Right-click menu: Start/Stop, Open, Reload, Settings, Quit.
+- Single instance: launching it again just opens the popup of the running one.
 - Settings (API token, language) live on a page inside the popup.
 - English and Japanese UI. Follows the Windows display language by default; switchable in Settings.
 
@@ -27,19 +28,34 @@ so the IME keeps working.
 
 ## Install
 
-Download `togglite.exe` (or the zip) from the
-[latest release](https://github.com/tattsun/togglite/releases/latest) and run it from anywhere.
-There is no installer; to start it with Windows, put a shortcut in `shell:startup`.
+Download `Togglite-Setup-<version>.exe` from the
+[latest release](https://github.com/tattsun/togglite/releases/latest) and run it. The installer
+is per-user (no admin prompt), adds a Start Menu entry, can start Togglite when you sign in
+(checkbox in the wizard, on by default), and speaks English and Japanese. Running a newer
+installer upgrades in place. Uninstall from Settings › Apps; it asks whether to remove your
+settings as well.
+
+Prefer no installer? `togglite.exe` (or the zip) from the same release runs from anywhere; to
+start it with Windows, put a shortcut in `shell:startup`.
+
+The binaries are not code-signed, so SmartScreen may show "Windows protected your PC" on first
+run; choose *More info › Run anyway*.
 
 ## Build from source
 
 Requirements: Windows 10/11, [mise](https://mise.jdx.dev/), Visual Studio with the C++ build tools and a Windows SDK.
+For the installer, [Inno Setup 6](https://jrsoftware.org/isinfo.php) with `iscc` on `PATH`.
 
 ```powershell
 mise install          # installs the pinned Rust toolchain
 mise run build        # target/release/togglite.exe
 mise run start        # launch
+mise run installer    # dist/Togglite-Setup-<version>.exe
 ```
+
+The exe carries a VERSIONINFO resource filled from `Cargo.toml` by `build.rs`; the installer
+script (`installer/togglite.iss`) reads its version from there, so `Cargo.toml` is the single
+source of truth.
 
 On first launch the settings page opens. Paste the API token from the bottom of your Toggl
 [Profile settings](https://track.toggl.com/profile) and save.
@@ -75,11 +91,11 @@ To add a language, add a variant to `Lang` (plus its tag and native name) and a 
 ## Releasing
 
 CI builds and tests every push. Pushing a tag that matches the version in `Cargo.toml`
-builds the release binary on GitHub Actions and publishes it with SHA-256 checksums:
+builds the release binary and the installer on GitHub Actions and publishes them with SHA-256 checksums:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 ## License

@@ -17,3 +17,8 @@ run = "cargo run"
 [tasks.test]
 description = "Run unit tests"
 run = "cargo test"
+
+[tasks.installer]
+description = "Release build + Inno Setup installer (dist/Togglite-Setup-<version>.exe)"
+depends = ["build"]
+run = "iscc installer/togglite.iss"

@@ -1,5 +1,6 @@
 # Build output
 /target
+/dist
 
 # Local tool / editor state
 /mise.local.toml

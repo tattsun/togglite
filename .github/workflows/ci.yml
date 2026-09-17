@@ -27,8 +27,14 @@ jobs:
       - name: Build (release)
         run: cargo build --release --locked
 
-      - name: Upload binary
+      - name: Build installer (Inno Setup, preinstalled on windows-latest)
+        shell: pwsh
+        run: iscc installer\togglite.iss
+
+      - name: Upload binary and installer
         uses: actions/upload-artifact@v4
         with:
           name: togglite-windows-x64
-          path: target/release/togglite.exe
+          path: |
+            target/release/togglite.exe
+            dist/Togglite-Setup-*.exe

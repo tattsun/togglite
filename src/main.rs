@@ -647,6 +647,8 @@ impl Host for App {
             Action::Recent(i) => self.start_recent(i),
             Action::Save => self.save_settings(),
             Action::OpenTokenPage => ui::open_url("https://track.toggl.com/profile"),
+            Action::Activate => self.show_popup(),
+            Action::Quit => nwg::stop_thread_dispatch(),
         }
     }
 
@@ -693,7 +695,29 @@ fn set_menu_item_text(item: &nwg::MenuItem, text: &str) {
     }
 }
 
+/// Returns false if Togglite is already running; that instance is asked to show its popup instead.
+/// The mutex handle is intentionally leaked so it lives as long as the process.
+fn claim_single_instance() -> bool {
+    use winapi::shared::winerror::ERROR_ALREADY_EXISTS;
+    use winapi::um::errhandlingapi::GetLastError;
+    use winapi::um::synchapi::CreateMutexW;
+    unsafe {
+        let mutex = CreateMutexW(std::ptr::null_mut(), 0, ui::wide("Local\\Togglite.SingleInstance").as_ptr());
+        if !mutex.is_null() && GetLastError() == ERROR_ALREADY_EXISTS {
+            let other = FindWindowW(ui::wide(ui::POPUP_CLASS).as_ptr(), std::ptr::null());
+            if !other.is_null() {
+                PostMessageW(other, ui::WM_TOGGLITE_SHOW, 0, 0);
+            }
+            return false;
+        }
+    }
+    true
+}
+
 fn main() {
+    if !claim_single_instance() {
+        return;
+    }
     nwg::init().expect("Failed to init Native Windows GUI");
     ui::init_gdiplus();
     ui::enable_dark_menus();
