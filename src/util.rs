@@ -1,4 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
+use winapi::um::minwinbase::SYSTEMTIME;
+use winapi::um::timezoneapi::{SystemTimeToTzSpecificLocalTime, TzSpecificLocalTimeToSystemTime};
 
 pub fn base64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -117,6 +119,122 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
     Some(days_from_civil(y, mo as u32, d as u32) * 86400 + h * 3600 + mi * 60 + sec - offset)
 }
 
+/// Broken-down wall-clock time in the user's time zone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LocalTime {
+    pub year: i64,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    /// 0 = Sunday.
+    pub weekday: u32,
+}
+
+impl LocalTime {
+    /// Days since the epoch of this calendar date; two times on the same local day share it.
+    pub fn days(&self) -> i64 {
+        days_from_civil(self.year, self.month, self.day)
+    }
+
+    /// `HH:MM`, as shown in the time fields.
+    pub fn hm(&self) -> String {
+        format!("{:02}:{:02}", self.hour, self.minute)
+    }
+}
+
+fn systemtime_utc(secs: i64) -> SYSTEMTIME {
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    SYSTEMTIME {
+        wYear: y as u16,
+        wMonth: m as u16,
+        wDayOfWeek: (days + 4).rem_euclid(7) as u16,
+        wDay: d as u16,
+        wHour: (rem / 3600) as u16,
+        wMinute: (rem % 3600 / 60) as u16,
+        wSecond: (rem % 60) as u16,
+        wMilliseconds: 0,
+    }
+}
+
+/// Converts a unix timestamp to local wall-clock time (honours DST via the Windows tz database).
+pub fn to_local(secs: i64) -> LocalTime {
+    let utc = systemtime_utc(secs);
+    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    if unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut st) } == 0 {
+        st = utc;
+    }
+    let (year, month, day) = (st.wYear as i64, st.wMonth as u32, st.wDay as u32);
+    LocalTime {
+        year,
+        month,
+        day,
+        hour: st.wHour as u32,
+        minute: st.wMinute as u32,
+        second: st.wSecond as u32,
+        weekday: (days_from_civil(year, month, day) + 4).rem_euclid(7) as u32,
+    }
+}
+
+/// Inverse of `to_local`: a local wall-clock time to unix seconds.
+pub fn from_local(year: i64, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
+    let local = SYSTEMTIME {
+        wYear: year as u16,
+        wMonth: month as u16,
+        wDayOfWeek: 0,
+        wDay: day as u16,
+        wHour: hour as u16,
+        wMinute: minute as u16,
+        wSecond: second as u16,
+        wMilliseconds: 0,
+    };
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    if unsafe { TzSpecificLocalTimeToSystemTime(std::ptr::null(), &local, &mut utc) } == 0 {
+        return days_from_civil(year, month, day) * 86400 + (hour * 3600 + minute * 60 + second) as i64;
+    }
+    days_from_civil(utc.wYear as i64, utc.wMonth as u32, utc.wDay as u32) * 86400
+        + (utc.wHour as i64) * 3600
+        + (utc.wMinute as i64) * 60
+        + utc.wSecond as i64
+}
+
+/// Parses a time of day typed by the user: `9:30`, `09:30`, `9:30:00`, `930`, `1330` or `9`.
+/// Full-width digits and colons (as the Japanese IME produces them) are accepted too.
+pub fn parse_hm(text: &str) -> Option<(u32, u32)> {
+    let s: String = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '０'..='９' => char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c),
+            '：' => ':',
+            _ => c,
+        })
+        .collect();
+    let (h, m) = if let Some((h, rest)) = s.split_once(':') {
+        let m = rest.split(':').next().unwrap_or("");
+        if m.len() != 2 {
+            return None;
+        }
+        (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+    } else {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        match s.len() {
+            1 | 2 => (s.parse::<u32>().ok()?, 0),
+            3 | 4 => {
+                let (h, m) = s.split_at(s.len() - 2);
+                (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+            }
+            _ => return None,
+        }
+    };
+    (h < 24 && m < 60).then_some((h, m))
+}
+
 pub fn fmt_hms(secs: i64) -> String {
     let s = secs.max(0);
     format!("{}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
@@ -180,5 +298,39 @@ mod tests {
         assert_eq!(fmt_hms(0), "0:00:00");
         assert_eq!(fmt_hms(3661), "1:01:01");
         assert_eq!(fmt_hms(-5), "0:00:00");
+    }
+
+    #[test]
+    fn local_roundtrip() {
+        // Noon UTC is never inside a DST transition, whatever the machine's zone.
+        for t in [0, 951782400 + 12 * 3600, 1758067200 + 12 * 3600, 1789000000] {
+            let l = to_local(t);
+            assert_eq!(from_local(l.year, l.month, l.day, l.hour, l.minute, l.second), t);
+            assert!(l.weekday < 7);
+        }
+        // Same calendar day at 00:00 sorts before 23:59 and shares `days()`.
+        let l = to_local(1758067200 + 12 * 3600);
+        let a = to_local(from_local(l.year, l.month, l.day, 0, 0, 0));
+        let b = to_local(from_local(l.year, l.month, l.day, 23, 59, 0));
+        assert_eq!(a.days(), b.days());
+        assert_eq!(b.hm(), "23:59");
+    }
+
+    #[test]
+    fn parses_times_of_day() {
+        assert_eq!(parse_hm("9:30"), Some((9, 30)));
+        assert_eq!(parse_hm(" 09:30 "), Some((9, 30)));
+        assert_eq!(parse_hm("23:59:59"), Some((23, 59)));
+        assert_eq!(parse_hm("930"), Some((9, 30)));
+        assert_eq!(parse_hm("1330"), Some((13, 30)));
+        assert_eq!(parse_hm("9"), Some((9, 0)));
+        assert_eq!(parse_hm("00"), Some((0, 0)));
+        assert_eq!(parse_hm("０９：３０"), Some((9, 30)));
+        assert_eq!(parse_hm("24:00"), None);
+        assert_eq!(parse_hm("9:60"), None);
+        assert_eq!(parse_hm("9:3"), None);
+        assert_eq!(parse_hm(""), None);
+        assert_eq!(parse_hm("abc"), None);
+        assert_eq!(parse_hm("12345"), None);
     }
 }

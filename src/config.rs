@@ -5,7 +5,8 @@
 //! field is still read and migrated to the encrypted form on the next save.
 //!
 //! `language` is an optional tag (`en`, `ja`); when absent the UI follows the
-//! Windows display language.
+//! Windows display language. `workspace_id` caches the default workspace from `/me`
+//! so that a sync costs no request for it (the free plan allows 30 requests per hour).
 
 use crate::util::{base64, base64_decode, wide};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,8 @@ pub struct Config {
     pub popup_x: Option<i32>,
     pub popup_y: Option<i32>,
     pub language: Option<String>,
+    /// Default workspace of the token's account, cached from `/me`.
+    pub workspace_id: Option<i64>,
     /// True when the token was read from the legacy plaintext field.
     pub legacy_plaintext: bool,
 }
@@ -38,6 +41,8 @@ struct Stored {
     popup_y: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<i64>,
 }
 
 pub fn path() -> PathBuf {
@@ -75,6 +80,7 @@ fn load_from(p: &Path) -> Config {
         popup_x: stored.popup_x,
         popup_y: stored.popup_y,
         language: stored.language.filter(|l| !l.trim().is_empty()),
+        workspace_id: stored.workspace_id.filter(|w| *w > 0),
         legacy_plaintext,
     }
 }
@@ -88,6 +94,7 @@ fn save_to(p: &Path, cfg: &Config) -> Result<(), String> {
         popup_x: cfg.popup_x,
         popup_y: cfg.popup_y,
         language: cfg.language.clone(),
+        workspace_id: cfg.workspace_id,
         ..Stored::default()
     };
     if !token.is_empty() {
@@ -176,6 +183,7 @@ mod tests {
             popup_x: Some(10),
             popup_y: Some(20),
             language: Some("ja".into()),
+            workspace_id: Some(42),
             legacy_plaintext: false,
         };
         save_to(&p, &cfg).unwrap();
@@ -186,6 +194,7 @@ mod tests {
         assert_eq!(back.api_token, "s3cret-token");
         assert_eq!((back.popup_x, back.popup_y), (Some(10), Some(20)));
         assert_eq!(back.language.as_deref(), Some("ja"));
+        assert_eq!(back.workspace_id, Some(42));
         assert!(!back.legacy_plaintext);
         let _ = fs::remove_file(&p);
     }

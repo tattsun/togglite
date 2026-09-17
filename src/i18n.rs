@@ -99,6 +99,21 @@ pub fn t() -> &'static Strings {
     current().strings()
 }
 
+/// A short calendar date for day headers and the editor, e.g. "Wed, Sep 17" / "9月17日 (水)".
+/// `weekday` is 0 for Sunday.
+pub fn date_label(month: u32, day: u32, weekday: u32) -> String {
+    date_label_in(current(), month, day, weekday)
+}
+
+fn date_label_in(lang: Lang, month: u32, day: u32, weekday: u32) -> String {
+    let s = lang.strings();
+    let wd = s.weekdays[weekday as usize % 7];
+    match lang {
+        Lang::En => format!("{wd}, {} {day}", s.months[(month as usize).clamp(1, 12) - 1]),
+        Lang::Ja => format!("{month}月{day}日 ({wd})"),
+    }
+}
+
 pub struct Strings {
     // tray menu
     pub menu_start: &'static str,
@@ -123,6 +138,18 @@ pub struct Strings {
     pub no_entries: &'static str,
     pub need_token: &'static str,
 
+    // history and editor pages
+    pub history: &'static str,
+    pub today: &'static str,
+    pub yesterday: &'static str,
+    pub edit_entry: &'static str,
+    pub delete: &'static str,
+    /// Label of the delete button once armed; the next click deletes.
+    pub delete_confirm: &'static str,
+    pub saving: &'static str,
+    pub weekdays: [&'static str; 7],
+    pub months: [&'static str; 12],
+
     // settings page
     pub settings: &'static str,
     pub cue_token: &'static str,
@@ -140,6 +167,8 @@ pub struct Strings {
     pub err_save_failed: &'static str,
     pub err_init_failed: &'static str,
     pub err_not_synced: &'static str,
+    pub err_rate_limit: &'static str,
+    pub err_bad_time: &'static str,
     pub err_parse: &'static str,
     pub err_auth: &'static str,
     pub err_network: &'static str,
@@ -166,6 +195,16 @@ static EN: Strings = Strings {
     no_entries: "No entries yet",
     need_token: "Add your API token in Settings",
 
+    history: "History",
+    today: "Today",
+    yesterday: "Yesterday",
+    edit_entry: "Edit entry",
+    delete: "Delete entry",
+    delete_confirm: "Click again to delete",
+    saving: "Saving…",
+    weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    months: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+
     settings: "Settings",
     cue_token: "Paste your API token",
     token_label: "Toggl API token",
@@ -180,6 +219,8 @@ static EN: Strings = Strings {
     err_save_failed: "Failed to save settings",
     err_init_failed: "Failed to initialize",
     err_not_synced: "Not synced yet",
+    err_rate_limit: "Toggl API hourly limit reached; try again later",
+    err_bad_time: "Enter times as HH:MM",
     err_parse: "Failed to parse the response",
     err_auth: "Authentication failed: check your API token",
     err_network: "Network error",
@@ -206,6 +247,16 @@ static JA: Strings = Strings {
     no_entries: "エントリがありません",
     need_token: "設定から API トークンを登録してください",
 
+    history: "履歴",
+    today: "今日",
+    yesterday: "昨日",
+    edit_entry: "エントリを編集",
+    delete: "エントリを削除",
+    delete_confirm: "もう一度クリックで削除",
+    saving: "保存中…",
+    weekdays: ["日", "月", "火", "水", "木", "金", "土"],
+    months: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+
     settings: "設定",
     cue_token: "API トークンを貼り付け",
     token_label: "Toggl API トークン",
@@ -220,6 +271,8 @@ static JA: Strings = Strings {
     err_save_failed: "設定の保存に失敗",
     err_init_failed: "初期化に失敗",
     err_not_synced: "まだ同期されていません",
+    err_rate_limit: "Toggl API の 1 時間あたりの上限に達しました。しばらく待ってください",
+    err_bad_time: "時刻は HH:MM 形式で入力してください",
     err_parse: "応答の解析に失敗",
     err_auth: "認証エラー: API トークンを確認してください",
     err_network: "通信エラー",
@@ -256,5 +309,12 @@ mod tests {
         set_preference(None);
         assert_eq!(preference(), None);
         assert_eq!(current(), system_lang());
+    }
+
+    #[test]
+    fn date_labels() {
+        assert_eq!(date_label_in(Lang::En, 9, 17, 3), "Wed, Sep 17");
+        assert_eq!(date_label_in(Lang::Ja, 9, 17, 3), "9月17日 (水)");
+        assert_eq!(date_label_in(Lang::En, 1, 1, 0), "Sun, Jan 1");
     }
 }

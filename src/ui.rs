@@ -356,7 +356,10 @@ const GLYPH_STOP: &str = "\u{E71A}";
 const GLYPH_CHEVRON: &str = "\u{E70D}";
 const GLYPH_CLOSE: &str = "\u{E711}";
 const GLYPH_BACK: &str = "\u{E72B}";
+const GLYPH_FORWARD: &str = "\u{E72A}";
 const GLYPH_GLOBE: &str = "\u{E774}";
+const GLYPH_HISTORY: &str = "\u{E81C}";
+const GLYPH_EDIT: &str = "\u{E70F}";
 
 // ---------------------------------------------------------------- view model
 
@@ -364,6 +367,10 @@ const GLYPH_GLOBE: &str = "\u{E774}";
 pub enum Page {
     Main,
     Settings,
+    /// Chronological list of the recent entries; click one to edit it.
+    History,
+    /// Editor for a single entry.
+    Edit,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -373,6 +380,15 @@ pub enum Action {
     Refresh,
     OpenSettings,
     CloseSettings,
+    OpenHistory,
+    CloseHistory,
+    /// Open the editor for the entry with this id (the running one included).
+    EditEntry(i64),
+    CloseEditor,
+    SaveEntry,
+    /// First click arms the button, the second deletes.
+    DeleteEntry,
+    /// Project chip on the main page or in the editor, whichever is showing.
     PickProject,
     PickLanguage,
     Recent(usize),
@@ -391,6 +407,7 @@ pub struct ProjectView {
 }
 
 pub struct RunningView {
+    pub id: i64,
     pub desc: String,
     pub project: Option<ProjectView>,
     pub elapsed: String,
@@ -412,8 +429,43 @@ pub struct View {
     pub language: String,
 }
 
+pub enum HistoryRow {
+    /// Day header: label ("Today", a date) and the day's total time.
+    Day { label: String, total: String },
+    Entry {
+        id: i64,
+        desc: String,
+        project: Option<ProjectView>,
+        /// "09:30 – 11:45", or "09:30 –" while running.
+        range: String,
+        duration: String,
+        running: bool,
+    },
+}
+
+pub struct HistoryView {
+    pub busy: bool,
+    pub error: Option<String>,
+    pub has_token: bool,
+    pub rows: Vec<HistoryRow>,
+}
+
+pub struct EditorView {
+    pub busy: bool,
+    pub error: Option<String>,
+    pub project: Option<ProjectView>,
+    /// The entry is the running one: no stop field, the duration ticks.
+    pub running: bool,
+    pub date: String,
+    /// Duration implied by the time fields as typed; None while they don't parse.
+    pub duration: Option<String>,
+    pub delete_armed: bool,
+}
+
 pub trait Host {
     fn view(&self) -> View;
+    fn history(&self) -> HistoryView;
+    fn editor(&self) -> EditorView;
     fn perform(&self, action: Action);
     /// The user dragged the popup to screen position (x, y).
     fn moved(&self, _x: i32, _y: i32) {}
@@ -424,6 +476,7 @@ pub trait Host {
 const WIN_W: i32 = 340;
 const WIN_H_MAIN: i32 = 534;
 const WIN_H_SETTINGS: i32 = 386;
+const WIN_H_EDIT: i32 = 390;
 const PAD: i32 = 16;
 const HEADER_Y: i32 = 14;
 const ICON_BTN: i32 = 28;
@@ -431,6 +484,8 @@ const CONTENT_Y: i32 = 54;
 const ROW_H: i32 = 40;
 const RECENT_CAPTION_Y: i32 = 210;
 const RECENT_ROWS_Y: i32 = 238;
+const HISTORY_DAY_H: i32 = 34;
+const HISTORY_ROW_H: i32 = 48;
 
 const EM_SETCUEBANNER: u32 = 0x1501;
 const DWMWA_WINDOW_ROUNDED_PREFERENCE: u32 = 33;
@@ -447,7 +502,11 @@ pub const WM_TOGGLITE_QUIT: UINT = WM_APP + 2;
 
 pub struct Popup {
     pub hwnd: HWND,
+    /// Description on the main page and in the editor; the token on the settings page.
     edit: HWND,
+    /// Start / stop time fields of the editor (HH:MM).
+    edit_start: HWND,
+    edit_stop: HWND,
     dpi: i32,
     fonts: Fonts,
     pal: Cell<Palette>,
@@ -457,9 +516,32 @@ pub struct Popup {
     pressed: Cell<Option<usize>>,
     tracking: Cell<bool>,
     regions: RefCell<Vec<(RECT, Action)>>,
+    /// First visible row of the recent list and of the history list.
     scroll: Cell<usize>,
+    scroll_history: Cell<usize>,
     /// Position the user dragged the window to; reused on later shows.
     pinned: Cell<Option<POINT>>,
+}
+
+/// The message loop runs `IsDialogMessage` on the popup, so WS_TABSTOP gives Tab / Shift+Tab
+/// navigation between the visible fields (and Enter / Esc arrive as IDOK / IDCANCEL).
+unsafe fn create_edit(parent: HWND, hinst: HINSTANCE, font: HFONT, style: DWORD) -> HWND {
+    let edit = CreateWindowExW(
+        0,
+        wide("EDIT").as_ptr(),
+        wide("").as_ptr(),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | style,
+        0,
+        0,
+        10,
+        10,
+        parent,
+        null_mut(),
+        hinst,
+        null_mut(),
+    );
+    SendMessageW(edit, WM_SETFONT, font as WPARAM, 1);
+    edit
 }
 
 unsafe extern "system" fn popup_proc(hwnd: HWND, msg: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -524,25 +606,18 @@ impl Popup {
             let fonts = Fonts::new(dpi);
             let pal = palette(system_dark());
 
-            let edit = CreateWindowExW(
-                0,
-                wide("EDIT").as_ptr(),
-                wide("").as_ptr(),
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
-                0,
-                0,
-                10,
-                10,
-                hwnd,
-                null_mut(),
-                hinst,
-                null_mut(),
-            );
-            SendMessageW(edit, WM_SETFONT, fonts.body as WPARAM, 1);
+            let edit = create_edit(hwnd, hinst, fonts.body, ES_LEFT);
+            let edit_start = create_edit(hwnd, hinst, fonts.body, ES_CENTER);
+            let edit_stop = create_edit(hwnd, hinst, fonts.body, ES_CENTER);
+            for e in [edit_start, edit_stop] {
+                SendMessageW(e, EM_SETCUEBANNER, 1, wide("HH:MM").as_ptr() as LPARAM);
+            }
 
             let popup = Popup {
                 hwnd,
                 edit,
+                edit_start,
+                edit_stop,
                 dpi,
                 fonts,
                 pal: Cell::new(pal),
@@ -553,6 +628,7 @@ impl Popup {
                 tracking: Cell::new(false),
                 regions: RefCell::new(Vec::new()),
                 scroll: Cell::new(0),
+                scroll_history: Cell::new(0),
                 pinned: Cell::new(None),
             };
             popup.apply_dwm();
@@ -613,13 +689,16 @@ impl Popup {
         self.page.set(page);
         self.hover.set(None);
         self.pressed.set(None);
+        // Stale hit regions from the old page must not catch a click before the repaint.
+        self.regions.borrow_mut().clear();
         self.apply_page_chrome();
         self.invalidate();
     }
 
     fn apply_page_chrome(&self) {
         let (h, cue, pw) = match self.page.get() {
-            Page::Main => (WIN_H_MAIN, t().cue_description, 0usize),
+            Page::Main | Page::History => (WIN_H_MAIN, t().cue_description, 0usize),
+            Page::Edit => (WIN_H_EDIT, t().cue_description, 0usize),
             Page::Settings => (WIN_H_SETTINGS, t().cue_token, '●' as usize),
         };
         let cue = wide(cue);
@@ -694,13 +773,17 @@ impl Popup {
         }
     }
 
-    pub fn edit_text(&self) -> String {
+    fn window_text(hwnd: HWND) -> String {
         unsafe {
-            let len = GetWindowTextLengthW(self.edit);
+            let len = GetWindowTextLengthW(hwnd);
             let mut buf = vec![0u16; len as usize + 1];
-            let n = GetWindowTextW(self.edit, buf.as_mut_ptr(), buf.len() as i32);
+            let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
             String::from_utf16_lossy(&buf[..n as usize])
         }
+    }
+
+    pub fn edit_text(&self) -> String {
+        Self::window_text(self.edit)
     }
 
     pub fn set_edit_text(&self, text: &str) {
@@ -710,16 +793,32 @@ impl Popup {
         }
     }
 
+    /// The editor's start and stop fields as typed.
+    pub fn time_texts(&self) -> (String, String) {
+        (Self::window_text(self.edit_start), Self::window_text(self.edit_stop))
+    }
+
+    pub fn set_time_texts(&self, start: &str, stop: &str) {
+        unsafe {
+            SetWindowTextW(self.edit_start, wide(start).as_ptr());
+            SetWindowTextW(self.edit_stop, wide(stop).as_ptr());
+        }
+    }
+
     pub fn focus_edit(&self) {
         unsafe {
             SetFocus(self.edit);
         }
     }
 
-    /// Native popup menu listing projects. Returns None if cancelled,
+    /// Native popup menu listing projects, anchored under whichever project chip is
+    /// showing (main page or editor). Returns None if cancelled,
     /// Some(None) for "no project", Some(Some(i)) for `names[i]`.
     pub fn pick_project(&self, names: &[String], current: Option<usize>) -> Option<Option<usize>> {
-        let chip = self.layout_main(false).chip;
+        let chip = match self.page.get() {
+            Page::Edit => self.layout_edit().chip,
+            _ => self.layout_main(false).chip,
+        };
         self.pick_below(&chip, t().no_project, names, current)
     }
 
@@ -796,9 +895,10 @@ impl Popup {
         let rows = ((ch - rows_y - self.s(PAD)) / row_h).max(0) as usize;
         MainLayout {
             dot: self.rect(PAD, HEADER_Y + 9, 10, 10),
-            caption: self.rect(PAD + 18, HEADER_Y, inner_w - 18 - 2 * (ICON_BTN + 6), ICON_BTN),
+            caption: self.rect(PAD + 18, HEADER_Y, inner_w - 18 - 3 * (ICON_BTN + 6), ICON_BTN),
             icon_a: self.rect(WIN_W - PAD - ICON_BTN, HEADER_Y, ICON_BTN, ICON_BTN),
             icon_b: self.rect(WIN_W - PAD - 2 * ICON_BTN - 6, HEADER_Y, ICON_BTN, ICON_BTN),
+            icon_c: self.rect(WIN_W - PAD - 3 * ICON_BTN - 12, HEADER_Y, ICON_BTN, ICON_BTN),
             pill: self.rect(PAD, CONTENT_Y, inner_w, 44),
             chip: self.rect(PAD, CONTENT_Y + 52, inner_w, 34),
             card: self.rect(PAD, CONTENT_Y, inner_w, 86),
@@ -829,6 +929,42 @@ impl Popup {
         }
     }
 
+    fn layout_history(&self) -> HistoryLayout {
+        let (_, ch) = self.client_size();
+        let inner_w = WIN_W - 2 * PAD;
+        HistoryLayout {
+            back: self.rect(PAD - 6, HEADER_Y, ICON_BTN, ICON_BTN),
+            caption: self.rect(PAD + 18, HEADER_Y, inner_w - 18 - ICON_BTN - 6, ICON_BTN),
+            refresh: self.rect(WIN_W - PAD - ICON_BTN, HEADER_Y, ICON_BTN, ICON_BTN),
+            list_top: self.s(CONTENT_Y),
+            list_bottom: ch - self.s(PAD),
+            day_h: self.s(HISTORY_DAY_H),
+            row_h: self.s(HISTORY_ROW_H),
+        }
+    }
+
+    fn layout_edit(&self) -> EditLayout {
+        let inner_w = WIN_W - 2 * PAD;
+        // Two time pills with an arrow between them.
+        let half = (inner_w - 28) / 2;
+        let times_y = CONTENT_Y + 120;
+        EditLayout {
+            back: self.rect(PAD - 6, HEADER_Y, ICON_BTN, ICON_BTN),
+            caption: self.rect(PAD + 18, HEADER_Y, inner_w - 18, ICON_BTN),
+            pill: self.rect(PAD, CONTENT_Y, inner_w, 44),
+            chip: self.rect(PAD, CONTENT_Y + 52, inner_w, 34),
+            start_label: self.rect(PAD, CONTENT_Y + 100, half, 16),
+            stop_label: self.rect(PAD + half + 28, CONTENT_Y + 100, half, 16),
+            start_pill: self.rect(PAD, times_y, half, 44),
+            arrow: self.rect(PAD + half, times_y, 28, 44),
+            stop_pill: self.rect(PAD + half + 28, times_y, half, 44),
+            meta: self.rect(PAD, CONTENT_Y + 174, inner_w, 20),
+            error: self.rect(PAD, CONTENT_Y + 200, inner_w, 18),
+            save: self.rect(PAD, CONTENT_Y + 224, inner_w, 44),
+            delete: self.rect(PAD, CONTENT_Y + 276, inner_w, 44),
+        }
+    }
+
     fn edit_rect_in(&self, pill: &RECT) -> RECT {
         let edit_h = self.s(20);
         let pad = self.s(14);
@@ -842,11 +978,19 @@ impl Popup {
     }
 
     fn place_edit(&self, rect: Option<RECT>) {
+        Self::place(self.edit, rect);
+    }
+
+    fn place(edit: HWND, rect: Option<RECT>) {
         unsafe {
             match rect {
                 Some(r) => {
+                    let mut cur: RECT = std::mem::zeroed();
+                    GetWindowRect(edit, &mut cur);
+                    let resized = (cur.right - cur.left, cur.bottom - cur.top)
+                        != (r.right - r.left, r.bottom - r.top);
                     SetWindowPos(
-                        self.edit,
+                        edit,
                         null_mut(),
                         r.left,
                         r.top,
@@ -854,9 +998,16 @@ impl Popup {
                         r.bottom - r.top,
                         SWP_NOZORDER | SWP_SHOWWINDOW,
                     );
+                    if resized {
+                        // An EDIT keeps the text layout of the size it had when the text was
+                        // set (e.g. the initial 10x10 before its first placement); re-set it.
+                        let text = Self::window_text(edit);
+                        SetWindowTextW(edit, wide(&text).as_ptr());
+                        SendMessageW(edit, EM_SETSEL as u32, 0, -1);
+                    }
                 }
                 None => {
-                    ShowWindow(self.edit, SW_HIDE);
+                    ShowWindow(edit, SW_HIDE);
                 }
             }
         }
@@ -865,8 +1016,12 @@ impl Popup {
     // ------------------------------------------------------------ painting
 
     fn paint(&self, host: &dyn Host) {
-        let view = host.view();
         let pal = self.pal.get();
+        let page = self.page.get();
+        if page != Page::Edit {
+            Self::place(self.edit_start, None);
+            Self::place(self.edit_stop, None);
+        }
         unsafe {
             let mut ps: PAINTSTRUCT = std::mem::zeroed();
             let hdc = BeginPaint(self.hwnd, &mut ps);
@@ -883,9 +1038,11 @@ impl Popup {
             let mut regions = Vec::new();
             {
                 let canvas = Canvas::new(mem);
-                match self.page.get() {
-                    Page::Main => self.paint_main(&canvas, &view, &mut regions),
-                    Page::Settings => self.paint_settings(&canvas, &view, &mut regions),
+                match page {
+                    Page::Main => self.paint_main(&canvas, &host.view(), &mut regions),
+                    Page::Settings => self.paint_settings(&canvas, &host.view(), &mut regions),
+                    Page::History => self.paint_history(&canvas, &host.history(), &mut regions),
+                    Page::Edit => self.paint_edit(&canvas, &host.editor(), &mut regions),
                 }
             }
             *self.regions.borrow_mut() = regions;
@@ -972,12 +1129,21 @@ impl Popup {
         regions.push((l.icon_a, Action::OpenSettings));
         self.icon_button(c, &l.icon_b, GLYPH_REFRESH, self.hovered(&prev, Action::Refresh));
         regions.push((l.icon_b, Action::Refresh));
+        self.icon_button(c, &l.icon_c, GLYPH_HISTORY, self.hovered(&prev, Action::OpenHistory));
+        regions.push((l.icon_c, Action::OpenHistory));
 
         // ---- entry area
         match &view.running {
             Some(run) => {
                 self.place_edit(None);
-                c.fill_round(&l.card, self.s(12) as f32, pal.surface);
+                // The card opens the editor (e.g. to fix a late start).
+                let hot = self.hovered(&prev, Action::EditEntry(run.id));
+                c.fill_round(&l.card, self.s(12) as f32, if hot { pal.surface2 } else { pal.surface });
+                if hot {
+                    let pr = RECT { left: l.card.right - self.s(34), top: l.card.top + self.s(8), right: l.card.right - self.s(12), bottom: l.card.top + self.s(30) };
+                    c.text(self.fonts.icon, pal.muted, &pr, GLYPH_EDIT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                regions.push((l.card, Action::EditEntry(run.id)));
                 let x = l.card.left + self.s(16);
                 let w = l.card.right - x - self.s(16);
                 let proj_r = RECT { left: x, top: l.card.top + self.s(10), right: x + w, bottom: l.card.top + self.s(26) };
@@ -1008,23 +1174,7 @@ impl Popup {
                 c.fill_round(&l.pill, self.s(10) as f32, pal.surface2);
                 self.place_edit(Some(self.edit_rect_in(&l.pill)));
 
-                let hot = self.hovered(&prev, Action::PickProject);
-                c.fill_round(&l.chip, self.s(9) as f32, if hot { pal.surface2 } else { pal.surface });
-                let cx = l.chip.left + self.s(16);
-                let cy = (l.chip.top + l.chip.bottom) / 2;
-                let name_r = RECT { left: l.chip.left + self.s(30), top: l.chip.top, right: l.chip.right - self.s(34), bottom: l.chip.bottom };
-                match &view.project {
-                    Some(p) => {
-                        c.dot(cx, cy, self.s(9), p.color.unwrap_or(pal.muted));
-                        c.text(self.fonts.body, pal.text, &name_r, &p.name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    }
-                    None => {
-                        c.ring(cx, cy, self.s(9), pal.muted, 1.5);
-                        c.text(self.fonts.body, pal.muted, &name_r, t().no_project, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                    }
-                }
-                let chev = RECT { left: l.chip.right - self.s(32), top: l.chip.top, right: l.chip.right - self.s(8), bottom: l.chip.bottom };
-                c.text(self.fonts.icon, pal.muted, &chev, GLYPH_CHEVRON, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                self.project_chip(c, &l.chip, view.project.as_ref(), self.hovered(&prev, Action::PickProject));
                 regions.push((l.chip, Action::PickProject));
 
                 let hot = self.hovered(&prev, Action::Start);
@@ -1074,6 +1224,194 @@ impl Popup {
             }
             regions.push((r, Action::Recent(idx)));
         }
+    }
+
+    /// Project picker chip: colour dot (or an empty ring), name and a chevron.
+    fn project_chip(&self, c: &Canvas, r: &RECT, project: Option<&ProjectView>, hot: bool) {
+        let pal = self.pal.get();
+        c.fill_round(r, self.s(9) as f32, if hot { pal.surface2 } else { pal.surface });
+        let cx = r.left + self.s(16);
+        let cy = (r.top + r.bottom) / 2;
+        let name_r = RECT { left: r.left + self.s(30), top: r.top, right: r.right - self.s(34), bottom: r.bottom };
+        match project {
+            Some(p) => {
+                c.dot(cx, cy, self.s(9), p.color.unwrap_or(pal.muted));
+                c.text(self.fonts.body, pal.text, &name_r, &p.name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            None => {
+                c.ring(cx, cy, self.s(9), pal.muted, 1.5);
+                c.text(self.fonts.body, pal.muted, &name_r, t().no_project, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+        let chev = RECT { left: r.right - self.s(32), top: r.top, right: r.right - self.s(8), bottom: r.bottom };
+        c.text(self.fonts.icon, pal.muted, &chev, GLYPH_CHEVRON, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    fn paint_history(&self, c: &Canvas, view: &HistoryView, regions: &mut Vec<(RECT, Action)>) {
+        let pal = self.pal.get();
+        let prev = self.regions.borrow();
+        let l = self.layout_history();
+        // No text field on this page; the main page's description edit must not linger.
+        self.place_edit(None);
+
+        // ---- header: back, title (or sync status), refresh
+        self.icon_button(c, &l.back, GLYPH_BACK, self.hovered(&prev, Action::CloseHistory));
+        regions.push((l.back, Action::CloseHistory));
+        let (caption, color, font) = if view.busy {
+            (t().status_syncing.to_string(), pal.muted, self.fonts.caption)
+        } else if let Some(e) = &view.error {
+            (e.clone(), pal.danger, self.fonts.caption)
+        } else {
+            (t().history.to_string(), pal.text, self.fonts.body_semi)
+        };
+        c.text(font, color, &l.caption, &caption, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        self.icon_button(c, &l.refresh, GLYPH_REFRESH, self.hovered(&prev, Action::Refresh));
+        regions.push((l.refresh, Action::Refresh));
+
+        let full = RECT { left: self.s(PAD), top: l.list_top, right: self.s(WIN_W - PAD), bottom: l.list_bottom };
+        if view.rows.is_empty() {
+            let r = RECT { bottom: l.list_top + l.row_h, ..full };
+            let msg = if view.has_token { t().no_entries } else { t().need_token };
+            c.text(self.fonts.caption, pal.muted, &r, msg, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            return;
+        }
+
+        // ---- rows: item-based scrolling over mixed heights, never past the last row
+        let height = |row: &HistoryRow| match row {
+            HistoryRow::Day { .. } => l.day_h,
+            HistoryRow::Entry { .. } => l.row_h,
+        };
+        let mut max_scroll = view.rows.len().saturating_sub(1);
+        let mut used = 0;
+        for (i, row) in view.rows.iter().enumerate().rev() {
+            used += height(row);
+            if used > l.list_bottom - l.list_top {
+                break;
+            }
+            max_scroll = i;
+        }
+        let scroll = self.scroll_history.get().min(max_scroll);
+        self.scroll_history.set(scroll);
+
+        let mut y = l.list_top;
+        for row in view.rows.iter().skip(scroll) {
+            let h = height(row);
+            if y + h > l.list_bottom {
+                break;
+            }
+            let r = RECT { top: y, bottom: y + h, ..full };
+            match row {
+                HistoryRow::Day { label, total } => {
+                    let tr = RECT { bottom: y + self.s(24), ..r };
+                    c.text(self.fonts.small, pal.muted, &tr, label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    c.text(self.fonts.small, pal.muted, &tr, total, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    c.hline(r.left, r.right, y + self.s(28), pal.border);
+                }
+                HistoryRow::Entry { id, desc, project, range, duration, running } => {
+                    let hot = self.hovered(&prev, Action::EditEntry(*id));
+                    if hot {
+                        c.fill_round(&r, self.s(8) as f32, pal.surface);
+                    }
+                    let (top1, bot1) = (r.top + self.s(4), r.top + self.s(26));
+                    let (top2, bot2) = (r.top + self.s(24), r.top + self.s(44));
+                    let cy = (top1 + bot1) / 2;
+                    match project {
+                        Some(p) => c.dot(r.left + self.s(14), cy, self.s(8), p.color.unwrap_or(pal.muted)),
+                        None => c.ring(r.left + self.s(14), cy, self.s(8), pal.border, 1.5),
+                    }
+                    // Right column: duration over the time range; a pencil slides in on hover.
+                    let pencil_w = if hot { self.s(22) } else { 0 };
+                    let col_r = r.right - self.s(12) - pencil_w;
+                    let col_l = col_r - self.s(96);
+                    let desc_r = RECT { left: r.left + self.s(28), top: top1, right: col_l - self.s(8), bottom: bot1 };
+                    let proj_r = RECT { left: r.left + self.s(28), top: top2, right: col_l - self.s(8), bottom: bot2 };
+                    let dur_r = RECT { left: col_l, top: top1, right: col_r, bottom: bot1 };
+                    let range_r = RECT { left: col_l, top: top2, right: col_r, bottom: bot2 };
+                    let d = if desc.is_empty() { t().no_description } else { desc.as_str() };
+                    c.text(self.fonts.body, if desc.is_empty() { pal.muted } else { pal.text }, &desc_r, d, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if let Some(p) = project {
+                        c.text(self.fonts.small, pal.muted, &proj_r, &p.name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    }
+                    c.text(self.fonts.body, if *running { pal.success } else { pal.text }, &dur_r, duration, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    c.text(self.fonts.small, pal.muted, &range_r, range, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    if hot {
+                        let pr = RECT { left: col_r, top: r.top, right: r.right - self.s(8), bottom: r.bottom };
+                        c.text(self.fonts.icon, pal.accent, &pr, GLYPH_EDIT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    regions.push((r, Action::EditEntry(*id)));
+                }
+            }
+            y += h;
+        }
+    }
+
+    fn paint_edit(&self, c: &Canvas, view: &EditorView, regions: &mut Vec<(RECT, Action)>) {
+        let pal = self.pal.get();
+        let prev = self.regions.borrow();
+        let l = self.layout_edit();
+
+        self.icon_button(c, &l.back, GLYPH_BACK, self.hovered(&prev, Action::CloseEditor));
+        regions.push((l.back, Action::CloseEditor));
+        c.text(self.fonts.body_semi, pal.text, &l.caption, t().edit_entry, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        // ---- description and project, as on the main page
+        c.fill_round(&l.pill, self.s(10) as f32, pal.surface2);
+        self.place_edit(Some(self.edit_rect_in(&l.pill)));
+        self.project_chip(c, &l.chip, view.project.as_ref(), self.hovered(&prev, Action::PickProject));
+        regions.push((l.chip, Action::PickProject));
+
+        // ---- start → stop
+        c.text(self.fonts.small, pal.muted, &l.start_label, t().start, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.text(self.fonts.small, pal.muted, &l.stop_label, t().stop, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        c.fill_round(&l.start_pill, self.s(10) as f32, pal.surface2);
+        Self::place(self.edit_start, Some(self.edit_rect_in(&l.start_pill)));
+        c.text(self.fonts.icon, pal.muted, &l.arrow, GLYPH_FORWARD, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if view.running {
+            // No stop yet: a quiet pill with the tracking dot instead of a field.
+            Self::place(self.edit_stop, None);
+            c.fill_round(&l.stop_pill, self.s(10) as f32, pal.surface);
+            let label = t().status_tracking;
+            let total = self.s(16) + self.measure(self.fonts.body, label);
+            let x = l.stop_pill.left + ((l.stop_pill.right - l.stop_pill.left) - total) / 2;
+            let cy = (l.stop_pill.top + l.stop_pill.bottom) / 2;
+            c.dot(x + self.s(4), cy, self.s(8), pal.success);
+            let tr = RECT { left: x + self.s(16), top: l.stop_pill.top, right: l.stop_pill.right, bottom: l.stop_pill.bottom };
+            c.text(self.fonts.body, pal.muted, &tr, label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            c.fill_round(&l.stop_pill, self.s(10) as f32, pal.surface2);
+            Self::place(self.edit_stop, Some(self.edit_rect_in(&l.stop_pill)));
+        }
+
+        // ---- date and the duration the fields add up to
+        c.text(self.fonts.small, pal.muted, &l.meta, &view.date, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        match &view.duration {
+            Some(d) => c.text(self.fonts.body_semi, if view.running { pal.success } else { pal.text }, &l.meta, d, DT_RIGHT | DT_VCENTER | DT_SINGLELINE),
+            None => c.text(self.fonts.body_semi, pal.muted, &l.meta, "–:––:––", DT_RIGHT | DT_VCENTER | DT_SINGLELINE),
+        }
+
+        if let Some(e) = &view.error {
+            c.text(self.fonts.small, pal.danger, &l.error, e, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else if view.busy {
+            c.text(self.fonts.small, pal.muted, &l.error, t().saving, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        let hot = self.hovered(&prev, Action::SaveEntry);
+        c.fill_round(&l.save, self.s(10) as f32, if hot { pal.accent_hover } else { pal.accent });
+        c.text(self.fonts.body_semi, pal.on_accent, &l.save, t().save, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        regions.push((l.save, Action::SaveEntry));
+
+        // Delete is a quiet text button until armed; then it fills red and asks for the second click.
+        let hot = self.hovered(&prev, Action::DeleteEntry);
+        if view.delete_armed {
+            c.fill_round(&l.delete, self.s(10) as f32, pal.danger);
+            c.text(self.fonts.body_semi, pal.on_accent, &l.delete, t().delete_confirm, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            if hot {
+                c.fill_round(&l.delete, self.s(10) as f32, pal.surface);
+            }
+            c.text(self.fonts.body_semi, pal.danger, &l.delete, t().delete, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        regions.push((l.delete, Action::DeleteEntry));
     }
 
     fn paint_settings(&self, c: &Canvas, view: &View, regions: &mut Vec<(RECT, Action)>) {
@@ -1191,11 +1529,16 @@ impl Popup {
                     0
                 }
                 WM_MOUSEWHEEL => {
+                    let cell = match self.page.get() {
+                        Page::Main => &self.scroll,
+                        Page::History => &self.scroll_history,
+                        Page::Settings | Page::Edit => return 0,
+                    };
                     let delta = GET_WHEEL_DELTA_WPARAM(w);
-                    let cur = self.scroll.get();
+                    let cur = cell.get();
                     let next = if delta > 0 { cur.saturating_sub(1) } else { cur + 1 };
                     if next != cur {
-                        self.scroll.set(next);
+                        cell.set(next);
                         self.hover.set(None);
                         self.invalidate();
                     }
@@ -1215,15 +1558,27 @@ impl Popup {
                     0
                 }
                 WM_COMMAND => {
+                    // Enter / Esc arrive from the EDIT children as IDOK / IDCANCEL.
+                    let code = ((w >> 16) & 0xFFFF) as u16;
                     match (w & 0xFFFF) as i32 {
                         IDOK => match self.page.get() {
                             Page::Main => host.perform(Action::Start),
                             Page::Settings => host.perform(Action::Save),
+                            Page::Edit => host.perform(Action::SaveEntry),
+                            Page::History => {}
                         },
                         IDCANCEL => match self.page.get() {
                             Page::Settings => host.perform(Action::CloseSettings),
+                            Page::History => host.perform(Action::CloseHistory),
+                            Page::Edit => host.perform(Action::CloseEditor),
                             Page::Main => self.hide(),
                         },
+                        // Typing in the time fields updates the duration read-out live.
+                        _ if code == EN_CHANGE && self.page.get() == Page::Edit => self.invalidate(),
+                        // Tabbing into a time field selects it, so typing replaces the time.
+                        _ if code == EN_SETFOCUS && (l as HWND == self.edit_start || l as HWND == self.edit_stop) => {
+                            SendMessageW(l as HWND, EM_SETSEL as u32, 0, -1);
+                        }
                         _ => {}
                     }
                     0
@@ -1296,6 +1651,7 @@ struct MainLayout {
     caption: RECT,
     icon_a: RECT,
     icon_b: RECT,
+    icon_c: RECT,
     pill: RECT,
     chip: RECT,
     card: RECT,
@@ -1321,6 +1677,32 @@ struct SettingsLayout {
     lang_chip: RECT,
     error: RECT,
     button: RECT,
+}
+
+struct HistoryLayout {
+    back: RECT,
+    caption: RECT,
+    refresh: RECT,
+    list_top: i32,
+    list_bottom: i32,
+    day_h: i32,
+    row_h: i32,
+}
+
+struct EditLayout {
+    back: RECT,
+    caption: RECT,
+    pill: RECT,
+    chip: RECT,
+    start_label: RECT,
+    stop_label: RECT,
+    start_pill: RECT,
+    arrow: RECT,
+    stop_pill: RECT,
+    meta: RECT,
+    error: RECT,
+    save: RECT,
+    delete: RECT,
 }
 
 #[allow(non_snake_case)]

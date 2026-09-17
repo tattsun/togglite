@@ -26,6 +26,9 @@ pub struct TimeEntry {
     pub stop: Option<String>,
     #[serde(default)]
     pub duration: i64,
+    /// Set on entries that were deleted; `since=` listings include them.
+    #[serde(default)]
+    pub server_deleted_at: Option<String>,
 }
 
 impl TimeEntry {
@@ -90,12 +93,21 @@ impl Client {
     }
 
     fn handle<T: DeserializeOwned>(r: Result<ureq::Response, ureq::Error>) -> Result<T, String> {
+        Self::check(r)?
+            .into_json::<T>()
+            .map_err(|e| format!("{}: {e}", t().err_parse))
+    }
+
+    /// Maps transport and HTTP errors to user-facing messages; the body is left to the caller.
+    fn check(r: Result<ureq::Response, ureq::Error>) -> Result<ureq::Response, String> {
         match r {
-            Ok(resp) => resp
-                .into_json::<T>()
-                .map_err(|e| format!("{}: {e}", t().err_parse)),
+            Ok(resp) => Ok(resp),
             Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
                 Err(t().err_auth.to_string())
+            }
+            // 402 is Toggl's "hourly quota of your plan is used up" (30/h on the free plan).
+            Err(ureq::Error::Status(402, _)) | Err(ureq::Error::Status(429, _)) => {
+                Err(t().err_rate_limit.to_string())
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
@@ -110,16 +122,16 @@ impl Client {
         Self::handle(self.req("GET", "/me").call())
     }
 
-    pub fn current(&self) -> Result<Option<TimeEntry>, String> {
-        Self::handle(self.req("GET", "/me/time_entries/current").call())
-    }
-
+    /// Entries of the last 30 days, the running one included (so `/me/time_entries/current`
+    /// is never needed). `since=` means "modified since", which includes entries deleted in
+    /// that window (flagged with `server_deleted_at`); those are dropped here.
     pub fn recent(&self) -> Result<Vec<TimeEntry>, String> {
         let since = now_unix() - 30 * 86400;
-        Self::handle(
+        let entries: Vec<TimeEntry> = Self::handle(
             self.req("GET", &format!("/me/time_entries?since={since}"))
                 .call(),
-        )
+        )?;
+        Ok(entries.into_iter().filter(|e| e.server_deleted_at.is_none()).collect())
     }
 
     pub fn projects(&self) -> Result<Vec<Project>, String> {
@@ -152,6 +164,41 @@ impl Client {
                 .call(),
         )
     }
+
+    /// Rewrites an entry. `stop: None` keeps it running (duration -1) with the new start.
+    pub fn update(
+        &self,
+        wid: i64,
+        id: i64,
+        description: &str,
+        project_id: Option<i64>,
+        start: i64,
+        stop: Option<i64>,
+    ) -> Result<TimeEntry, String> {
+        let mut body = serde_json::json!({
+            "created_with": "togglite",
+            "workspace_id": wid,
+            "description": description,
+            "project_id": project_id,
+            "start": rfc3339_utc(start),
+            "duration": stop.map_or(-1, |s| s - start),
+        });
+        if let Some(s) = stop {
+            body["stop"] = serde_json::Value::String(rfc3339_utc(s));
+        }
+        Self::handle(
+            self.req("PUT", &format!("/workspaces/{wid}/time_entries/{id}"))
+                .send_json(body),
+        )
+    }
+
+    /// An entry that is already gone (404) counts as deleted so the local copy goes away too.
+    pub fn delete(&self, wid: i64, id: i64) -> Result<(), String> {
+        match self.req("DELETE", &format!("/workspaces/{wid}/time_entries/{id}")).call() {
+            Err(ureq::Error::Status(404, _)) => Ok(()),
+            r => Self::check(r).map(|_| ()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -167,7 +214,22 @@ mod tests {
             start: start.to_string(),
             stop: None,
             duration,
+            server_deleted_at: None,
         }
+    }
+
+    #[test]
+    fn deleted_entries_are_flagged_by_the_api() {
+        let live: TimeEntry = serde_json::from_str(
+            r#"{"id":1,"workspace_id":2,"start":"2026-09-16T12:00:00Z","stop":"2026-09-16T12:10:00Z","duration":600}"#,
+        )
+        .unwrap();
+        let gone: TimeEntry = serde_json::from_str(
+            r#"{"id":1,"workspace_id":2,"start":"2026-09-16T12:00:00Z","duration":600,"server_deleted_at":"2026-09-17T01:02:03Z"}"#,
+        )
+        .unwrap();
+        assert!(live.server_deleted_at.is_none());
+        assert!(gone.server_deleted_at.is_some());
     }
 
     #[test]

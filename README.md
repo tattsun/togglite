@@ -14,6 +14,11 @@ The release binary is about 0.6 MB and uses a few MB of private memory.
   - while running, a card with a large timer and a Stop button
   - recent entries restart with a single click (mouse wheel to scroll)
   - Esc or losing focus closes the popup; drag any empty area to move it, and the position is remembered
+- History page (clock icon): the last 30 days grouped by day with daily totals; click an entry to edit it.
+  Clicking the running-timer card edits the current entry (e.g. to fix a late start).
+- Editor: description, project, start and stop times (`HH:MM`, a stop before the start rolls over to the
+  next day), the resulting duration shown live; Tab moves between fields, Enter saves. Delete asks for a
+  second click instead of a dialog.
 - Right-click menu: Start/Stop, Open, Reload, Settings, Quit.
 - Single instance: launching it again just opens the popup of the running one.
 - Settings (API token, language) live on a page inside the popup.
@@ -23,7 +28,7 @@ The release binary is about 0.6 MB and uses a few MB of private memory.
 
 The popup is custom-drawn with GDI+ (rounded pills, cards and buttons, DWM rounded window corners,
 hover states). It follows the Windows app theme (dark/light) automatically. Text uses Segoe UI and
-icons use Segoe MDL2 Assets. The only stock control is a borderless Win32 EDIT for the text field,
+icons use Segoe MDL2 Assets. The only stock controls are borderless Win32 EDITs for the text fields,
 so the IME keeps working.
 
 ## Install
@@ -67,6 +72,9 @@ On first launch the settings page opens. Paste the API token from the bottom of 
   one in Settings; the choice is stored as `"language"` in `config.json` and applies immediately.
 - The API token is encrypted with Windows DPAPI, bound to your user account, so it cannot be decrypted by other users or on other machines.
 - The only network endpoint is `https://api.track.toggl.com`. There is no telemetry and no auto-update.
+- Toggl's free plan allows 30 API requests per hour. A sync (startup, Reload) costs 2 requests
+  (3 the first time, when the default workspace is fetched and cached as `"workspace_id"`);
+  start, stop, save and delete cost 1 each. Nothing polls in the background.
 - To render popup menus in the dark theme, Togglite calls the same undocumented uxtheme.dll entry points (ordinals 135/136) that Explorer uses. If they are missing, it silently falls back to the default menu look.
 
 ## Development
